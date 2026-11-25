@@ -16,18 +16,14 @@ def bot(choice: str):
 def compare(player1Choice: str, player2Choice: str, winner: str):
     if player1Choice == player2Choice:
         winner = "tie"
-    elif player1Choice == "rock" and player2Choice == "paper":
-        winner = "bot"
-    elif player1Choice == "rock" and player2Choice == "scissors":
+    elif (
+        (player1Choice == "rock" and player2Choice == "scissors")
+        or (player1Choice == "paper" and player2Choice == "rock")
+        or (player1Choice == "scissors" and player2Choice == "paper")
+    ):
         winner = "player"
-    elif player1Choice == "paper" and player2Choice == "rock":
-        winner = "player"
-    elif player1Choice == "paper" and player2Choice == "scissors":
+    else:
         winner = "bot"
-    elif player1Choice == "scissors" and player2Choice == "rock":
-        winner = "bot"
-    elif player1Choice == "scissors" and player2Choice == "paper":
-        winner = "player"
 
     return winner
 
@@ -37,19 +33,14 @@ def game(live: bool):
     validUserChoice: bool = False
     while not validUserChoice:
         user_choice = input("Type Rock, Paper, Scissors to play. Type exit to stop: ")
-        match user_choice.lower():
+        match user_choice.lower().strip():
             case "rock" | "paper" | "scissors":
                 validUserChoice = True
             case "exit":
-                validUserChoice = True
-                live = False
                 print("Quitting the game")
+                return False
             case _:
-                validUserChoice = False
                 print("Invalid input")
-        
-    if live == False:
-       return live 
 
     bot_choice = bot(bot_choice)
     winner = compare(user_choice, bot_choice, winner)
@@ -58,8 +49,8 @@ def game(live: bool):
 
     validUserChoice = False
     while not validUserChoice:
-        again = input("Would you like to play again? Enter yes or no.")
-        match again.lower():
+        replay = input("Would you like to play again? Enter yes or no.")
+        match replay.lower().strip():
             case "yes":
                 validUserChoice = True
                 live = True
@@ -68,8 +59,6 @@ def game(live: bool):
                 live = False
                 print("You have chosen to end the game.")
             case _:
-                validUserChoice = False
-                live = True
                 print("Invalid input")
 
     return live
