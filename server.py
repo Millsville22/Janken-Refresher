@@ -20,14 +20,20 @@ def get_move(conn, player, moves):
     except ConnectionResetError:
         moves[player] = None
 
-def determine_winner(p1_move, p2_move):
+def determine_winner(p1_move, p2_move, p1_score, p2_score):
     if p1_move == p2_move:
+        p1_score.ties += 1
+        p2_score.ties += 1
         return "It's a tie!", "It's a tie!"
 
     wins = {'rock': 'scissors', 'paper': 'rock', 'scissors': 'paper'}
     if wins[p1_move] == p2_move:
+        p1_score.wins += 1
+        p2_score.losses += 1
         return "You win!", "You lose!"
     else:
+        p1_score.losses +=1
+        p2_score.wins += 1
         return "You lose!", "You win!"
 
 def handle_player(conn, player_id, match_id, round_num, state):
@@ -65,10 +71,17 @@ def handle_player(conn, player_id, match_id, round_num, state):
         state['stop_event'].set()
 
 
+class Score:
+    wins: int = 0
+    losses: int = 0
+    ties: int = 0
+
 
 def run_head_to_head(match_id, pair_conns):
     state = {
         'players': {1: pair_conns[0], 2: pair_conns[1]},
+        'p1_score': Score(),
+        'p2_score': Score(),
         'moves': {},
         'lock': threading.Lock(),
         'stop_event': threading.Event(),
@@ -108,13 +121,16 @@ def run_head_to_head(match_id, pair_conns):
                             pass
                     state['players'].clear()
                     pass
+                continue
 
             # Send round results
             m1, m2 = state['moves'][1], state['moves'][2]
-            p1_msg, p2_msg = determine_winner(m1, m2)
+            p1_msg, p2_msg = determine_winner(m1, m2, state['p1_score'], state['p2_score'])
             try:
                 pair_conns[0].sendall(f"\nYou chose {m1}, opponent chose {m2}, {p1_msg}\n".encode())
+                pair_conns[0].sendall(f"\nWins={state['p1_score'].wins} Losses={state['p1_score'].losses} Ties= {state['p1_score'].ties}\n".encode())
                 pair_conns[1].sendall(f"\nYou chose {m2}, opponent chose {m1}, {p2_msg}\n".encode())
+                pair_conns[1].sendall(f"\nWins={state['p2_score'].wins} Losses={state['p2_score'].losses} Ties= {state['p2_score'].ties}\n".encode())
             except OSError:
                 pass
 
