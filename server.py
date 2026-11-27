@@ -3,8 +3,8 @@ import threading
 import sys
 
 HOST_IP = '10.80.93.19'
-#HOST_IP = '127.0.0.1'
 PORT_NO = 5556
+PLAYERS_PER_MATCH = 2
 
 def get_move(conn, player, moves):
     try:
@@ -23,14 +23,110 @@ def get_move(conn, player, moves):
 def determine_winner(p1_move, p2_move):
     if p1_move == p2_move:
         return "It's a tie!", "It's a tie!"
-    elif (
-        (p1_move == "rock" and p2_move == "scissors")
-        or (p1_move == "paper" and p2_move == "rock")
-        or (p1_move == "scissors" and p2_move == "paper")
-    ):
+
+    wins = {'rock': 'scissors', 'paper': 'rock', 'scissors': 'paper'}
+    if wins[p1_move] == p2_move:
         return "You win!", "You lose!"
     else:
         return "You lose!", "You win!"
+
+def handle_player(conn, player_id, match_id, round_num, state):
+    try:
+        prompt = f"[Match {match_id} - Round {round_num}] Enter rock, paper, sissors, or 'exit': "
+        conn.sendall(prompt.encode())
+
+        while not state['stop_event'].is_set():
+            data = conn.recv(1024)
+            if not data:
+                print(f"[Match {match_id}] Player {player_id} closed their client.")
+                state['stop_reason'] = f"Player {player_id} disconnected."
+                state['stop_event'].set()
+                return
+                #raise ConnectionResetError()
+
+            move = data.decode().strip().lower()
+            if move == 'exit':
+                print(f"[Match {match_id}] Player {player_id} exited the match.")
+                state['stop_reason'] = f"Player {player_id} left the match."
+                state['stop_event'].set()
+                return
+
+            if move in ('rock', 'paper', 'scissors'):
+                with state['lock']:
+                    state['moves'][player_id] = move
+                conn.sendall("Move locked in. Waiting for opponent...\n".encode())
+                break
+            else:
+                conn.sendall("Invalid move. Enter rock, paper, or scissors: ".encode())
+
+    except (ConnectionResetError, BrokenPipeError, OSError):
+        print(f"[Match {match_id}] Player {player_id} lost connection.")
+        state['stop_reason'] = f"Player {player_id} disconnected."
+        state['stop_event'].set()
+
+
+
+def run_head_to_head(match_id, pair_conns):
+    state = {
+        'players': {1: pair_conns[0], 2: pair_conns[1]},
+        'moves': {},
+        'lock': threading.Lock(),
+        'stop_event': threading.Event(),
+        'stop_reason': "Match ended."
+    }
+
+    round_num = 1
+
+    try:
+        while not state['stop_event'].is_set():
+            # Reset moves each round
+            state['moves'].clear()
+            threads = []
+
+            for player_id in range(1, PLAYERS_PER_MATCH + 1):
+                conn = state['players'][player_id]
+                t = threading.Thread(
+                    target = handle_player,
+                    args=(conn, player_id, match_id, round_num, state),
+                    daemon=True
+                )
+                threads.append(t)
+                t.start()
+
+            for t in threads:
+                t.join()
+
+            # Check for exit or disconnects
+            if state['stop_event'].is_set() or len(state['moves']) < PLAYERS_PER_MATCH:
+                print(f"[Match {match_id}] Aborted due to disconnect.")
+                with state['lock']:
+                    for remaining_conn in state['players'].values():
+                        try:
+                            remaining_conn.sendall("\nOppoenent disconnected. Match Closed.\n".encode())
+                            remaining_conn.close()
+                        except OSError:
+                            pass
+                    state['players'].clear()
+                    pass
+
+            # Send round results
+            m1, m2 = state['moves'][1], state['moves'][2]
+            p1_msg, p2_msg = determine_winner(m1, m2)
+            try:
+                pair_conns[0].sendall(f"\nYou chose {m1}, opponent chose {m2}, {p1_msg}\n".encode())
+                pair_conns[1].sendall(f"\nYou chose {m2}, opponent chose {m1}, {p2_msg}\n".encode())
+            except OSError:
+                pass
+
+            print(f"[Match {match_id}] - Round {round_num}] {m1} vs {m2}")
+            round_num += 1
+    finally:
+        for conn in pair_conns:
+            try:
+                conn.close()
+            except OSError:
+                pass
+        print(f"[Match {match_id}] All sockets closed.")
 
 def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # IPv4 TCP socket
@@ -39,44 +135,48 @@ def start_server():
     server.listen(2)
     print(f"Server listening on {HOST_IP}:{PORT_NO}. Waiting for 2 players...")
 
-    players=[]
-    while len(players) < 2:
-        conn, addr = server.accept()
-        print(f"Player {len(players) + 1} connected from {addr}")
-        players.append(conn)
-        if len(players) == 1:
-            conn.sendall("Connected! Waiting for Player 2 to join...\n".encode())
+    waiting_player = None
+    match_counter = 0
 
-    moves = {}
+    try:
+        while True:
+            conn, addr = server.accept()
+            if waiting_player is None:
+                try:
+                    conn.sendall("Connected! Waiting for an oppoenent to join...\n".encode())
+                    waiting_player = (conn, addr)
+                    print(f"Player queued from {addr}. Waiting for a partner...")
+                except OSError:
+                    conn.close()
 
-    # Different threads for each player
-    t1 = threading.Thread(target=get_move, args=(players[0], 1, moves))
-    t2 = threading.Thread(target=get_move, args=(players[1], 2, moves))
+            else:
+                p1_conn, p1_addr = waiting_player
+                try:
+                    p1_conn.sendall("Opponent matched! Starting game...\n".encode())
+                except OSError:
+                    p1_conn.close()
+                    conn.sendall("Connected! Waiting for an oppoenent to join...\n".encode())
+                    waiting_player = (conn, addr)
+                    print(f"Previous queued player dropped. {addr} is now waiting...")
+                    continue
 
-    t1.start()
-    t2.start()
+                match_counter += 1
+                print(f"[Match {match_counter}] Paired {p1_addr} vs {addr}")
+                waiting_player = None
 
-    print(f"I am here")
+                match_thread = threading.Thread(
+                    target=run_head_to_head,
+                    args=(match_counter, [p1_conn, conn]),
+                    daemon=True
+                )
+                match_thread.start()
 
-    # Waiting for both player's moves
-    t1.join()
-    t2.join()
-
-    if moves.get(1) and moves.get(2):
-        p1_msg, p2_msg = determine_winner(moves[1], moves[2])
-        players[0].sendall(f"\nYou chose {moves[1]}, opponent chose {moves[2]}, {p1_msg}\n".encode())
-        players[1].sendall(f"\nYou chose {moves[2]}, opponent chose {moves[1]}, {p2_msg}\n".encode())
-    else:
-        for p in players:
-            try:
-                p.sendall("\nGame aborted: a player disconnected.\n".encode())
-            except OSError:
-                pass
-
-    for p in players:
-        p.close()
-    server.close()
-    print("Match finished. Server Closed.")
+    except KeyboardInterrupt:
+        print(f"\nShutting down matchmaking server...")
+    finally:
+        if waiting_player:
+            waiting_player[0].close()
+        server.close()
 
 if __name__ == '__main__':
     try:
